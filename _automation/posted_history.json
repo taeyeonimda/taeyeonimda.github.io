@@ -5,10 +5,18 @@
     {
       "date": "2026-11-25 13:41:54 +0900",
       "track": "Track B (커리큘럼 시리즈 - Salesforce Apex 엔터프라이즈 아키텍처 #1)",
-      "title": "엔터프라이즈 Apex Trigger Framework 설계 및 Bulkification 완벽 가이드 | Salesforce Apex 엔터프라이즈 아키텍처 #1",
+      "title": "실무 중심 Apex Trigger & Handler 설계와 Bulkification 가이드 (feat. TriggerSwitch 패턴)",
       "file": "_posts/2026-11-25-salesforce-apex-trigger-framework-best-practices.md",
       "source_url": null,
       "curriculum_id": "sf-apex-01"
+    },
+    {
+      "date": "2026-11-25 16:05:00 +0900",
+      "track": "Track B (커리큘럼 시리즈 - Salesforce Apex 엔터프라이즈 아키텍처 #2)",
+      "title": "실무 중심 비동기 Apex 완전 정복: @future 한계부터 Queueable 체이닝, Batch Apex 주의점까지",
+      "file": "_posts/2026-11-25-salesforce-asynchronous-apex-future-queueable-batch.md",
+      "source_url": null,
+      "curriculum_id": "sf-apex-02"
     }
   ]
 }

@@ -45,7 +45,9 @@
       "Queueable Finalizer(Transaction Finalizers)를 활용한 비동기 실패 복구 및 로깅 설계",
       "수백만 건 대용량 데이터 처리를 위한 Database.Batchable 및 Database.Stateful 사용 시 주의점"
     ],
-    "completed": false
+    "completed": true,
+    "completed_at": "2026-11-25 16:05:00 +0900",
+    "post_file": "_posts/2026-11-25-salesforce-asynchronous-apex-future-queueable-batch.md"
   },
   {
     "id": "sf-apex-03",
