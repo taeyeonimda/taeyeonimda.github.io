@@ -261,12 +261,128 @@ public class InactiveAccountCleanupBatch implements Database.Batchable<SObject>,
 
 ```mermaid
 flowchart LR
-    A["1. 수신 Callout (데이터 파싱)"] --> B["2. 1차 Iterable Batch (연관 객체 + 스위치)"]
+    A["1. @future 수신 Callout (JSON 파싱)"] --> B["2. 1차 Iterable Batch (연관 객체 + 스위치)"]
     B -- "finish() 체이닝" --> C["3. 2차 Stateful Batch (부분 저장 & 성공 ID 수집)"]
     C -- "finish() 체이닝" --> D["4. ACK Queueable (성공 ID 외부 회신)"]
 ```
 
-### 1단계 & 2단계: 메모리 리스트를 바로 태우는 `Iterable<SObject>` 1차 배치
+### 1단계: `@future(callout=true)`로 외부 데이터 수신 및 Wrapper 파싱 후 배치 체인 시작
+
+먼저 외부 API 게이트웨이를 호출해 변경 데이터를 받아오고, 내부 `Wrapper` 클래스로 역직렬화(Deserialize)하여 업데이트용 리스트를 구성한 뒤 첫 번째 배치를 출발시키는 진입점 클래스입니다. (사번 등 외부 키로 `User`를 매핑할 때도 루프 밖에서 단 1회 SOQL로 처리합니다.)
+
+```apex
+/**
+ * @description 외부 시스템으로부터 변경 데이터를 수신하여 배치 체인을 시작하는 클래스
+ * 호출 예시: ExternalDataFetchService.fetchUpdatedRecords();
+ */
+public class ExternalDataFetchService {
+
+    @future(callout = true)
+    public static void fetchUpdatedRecords() {
+        Http http = new Http();
+        HttpRequest request = new HttpRequest();
+
+        request.setEndpoint('https://<외부_API_엔드포인트>/v1/sync/pending-orders');
+        request.setMethod('POST');
+        request.setHeader('Content-Type', 'application/json; charset=utf-8');
+        request.setHeader('x-api-key', '<발급받은_API_KEY>'); // 실무 운영 시 Named Credential 또는 Custom Metadata 분리 권장
+        request.setTimeout(120000); // 최대 타임아웃 120초
+        request.setBody(JSON.serialize(new Map<String, Object>()));
+
+        HttpResponse response = http.send(request);
+        if (response.getStatusCode() >= 200 && response.getStatusCode() < 300) {
+            // API 게이트웨이가 JSON 문자열을 한 번 더 감싸서 반환하는 경우 언래핑 처리
+            String rawBody = response.getBody();
+            String jsonPayload = rawBody.startsWith('"')
+                ? (String) JSON.deserialize(rawBody, String.class)
+                : rawBody;
+
+            parseAndStartBatchChain(jsonPayload);
+        } else {
+            System.debug(LoggingLevel.ERROR, '외부 수신 실패: ' + response.getStatusCode() + ' / ' + response.getBody());
+        }
+    }
+
+    private static void parseAndStartBatchChain(String jsonPayload) {
+        try {
+            List<SyncRecordWrapper> wrappers = (List<SyncRecordWrapper>) JSON.deserialize(
+                jsonPayload,
+                List<SyncRecordWrapper>.class
+            );
+            if (wrappers == null || wrappers.isEmpty()) {
+                return;
+            }
+
+            // 1. 담당자 사번(EmployeeNumber) 등 참조 키를 먼저 모아 단 1회 SOQL로 매핑 준비
+            Set<String> empNumbers = new Set<String>();
+            for (SyncRecordWrapper w : wrappers) {
+                if (String.isNotBlank(w.MANAGER_EMP_NO)) {
+                    empNumbers.add(w.MANAGER_EMP_NO);
+                }
+            }
+
+            Map<String, Id> empNoToUserIdMap = new Map<String, Id>();
+            if (!empNumbers.isEmpty()) {
+                for (User u : [SELECT Id, EmployeeNumber FROM User WHERE EmployeeNumber IN :empNumbers]) {
+                    empNoToUserIdMap.put(u.EmployeeNumber, u.Id);
+                }
+            }
+
+            // 2. 배치에 넘길 업데이트 대상 SObject 리스트 및 외부 키 매핑 구성
+            List<Invoice__c> invoicesToUpdate = new List<Invoice__c>();
+            List<OrderItem> itemsToUpdate = new List<OrderItem>();
+            Map<Id, String> sfIdToExternalKeyMap = new Map<Id, String>();
+
+            for (SyncRecordWrapper w : wrappers) {
+                if (String.isNotBlank(w.SF_INVOICE_ID)) {
+                    invoicesToUpdate.add(new Invoice__c(
+                        Id = (Id) w.SF_INVOICE_ID,
+                        External_Spec__c = w.SPEC_CODE,
+                        Synced_At__c = System.now()
+                    ));
+                }
+
+                if (String.isNotBlank(w.SF_ORDER_ITEM_ID)) {
+                    OrderItem item = new OrderItem(
+                        Id = (Id) w.SF_ORDER_ITEM_ID,
+                        Description = w.ITEM_NAME
+                    );
+                    // 매핑된 내부 User Id가 있으면 할당
+                    if (empNoToUserIdMap.containsKey(w.MANAGER_EMP_NO)) {
+                        // 커스텀 담당자 필드에 세팅 예시
+                        item.put('Engineer_User__c', empNoToUserIdMap.get(w.MANAGER_EMP_NO));
+                    }
+                    itemsToUpdate.add(item);
+                    sfIdToExternalKeyMap.put(item.Id, w.EXTERNAL_SYNC_KEY);
+                }
+            }
+
+            // 3. 파싱된 메모리 리스트를 1차 배치로 넘겨 체이닝 파이프라인 시작!
+            if (!invoicesToUpdate.isEmpty() || !itemsToUpdate.isEmpty()) {
+                Database.executeBatch(
+                    new SyncRelatedInvoiceBatch(invoicesToUpdate, itemsToUpdate, sfIdToExternalKeyMap),
+                    200
+                );
+            }
+        } catch (Exception e) {
+            System.debug(LoggingLevel.ERROR, '파싱 및 배치 시작 오류: ' + e.getLineNumber() + ' / ' + e.getMessage());
+            // 필요시 OrgWideEmailAddress를 활용한 관리자 장애 알림 메일 발송 처리
+        }
+    }
+
+    // 외부 JSON 응답 매핑용 DTO Wrapper 클래스
+    public class SyncRecordWrapper {
+        public String EXTERNAL_SYNC_KEY; // 외부 시스템 고유 키 (ACK 회신용)
+        public String SF_INVOICE_ID;     // Salesforce 상위/연관 레코드 ID
+        public String SF_ORDER_ITEM_ID;  // Salesforce 품목 레코드 ID
+        public String ITEM_NAME;
+        public String SPEC_CODE;
+        public String MANAGER_EMP_NO;    // 담당자 사번
+    }
+}
+```
+
+### 2단계: 메모리 리스트를 바로 태우는 `Iterable<SObject>` 1차 배치
 
 보통 배치는 `Database.QueryLocator`로 DB를 조회할 때만 쓴다고 생각하기 쉽지만, 이미 외부 API 응답으로 메모리에 만들어 둔 `List<SObject>`가 있다면 **`Iterable<SObject>`**를 반환하여 불필요한 SOQL 없이 200건 단위로 안전하게 쪼개어 DML을 칠 수 있습니다.
 
@@ -375,10 +491,11 @@ public class SendSyncAckQueueable implements Queueable, Database.AllowsCallouts 
 
     public void execute(QueueableContext context) {
         HttpRequest req = new HttpRequest();
-        // 보안과 환경 분리를 위해 하드코딩 URL/API Key 대신 Named Credential 사용 권장
-        req.setEndpoint('callout:External_System_API/v1/sync/ack');
+        // <외부_ACK_API_엔드포인트> 호출 (실무에서는 Named Credential 사용 시 키 관리가 더욱 안전함)
+        req.setEndpoint('https://<외부_ACK_API_엔드포인트>/v1/sync/ack');
         req.setMethod('POST');
         req.setHeader('Content-Type', 'application/json; charset=utf-8');
+        req.setHeader('x-api-key', '<발급받은_API_KEY>');
         req.setTimeout(120000);
 
         Map<String, Object> payload = new Map<String, Object>{
