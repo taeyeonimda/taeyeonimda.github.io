@@ -39,6 +39,15 @@ toc: true
 """
 
 
+def build_system_instruction(date_str: str, main_category: str, sub_category: str) -> str:
+    """중괄호({}) 문법 충돌 없이 안전하게 시스템 프롬프트를 생성합니다."""
+    return (
+        SYSTEM_INSTRUCTION.replace("{date_str}", date_str)
+        .replace("{main_category}", main_category)
+        .replace("{sub_category}", sub_category)
+    )
+
+
 def build_track_a_prompt(
     article_title: str,
     article_url: str,

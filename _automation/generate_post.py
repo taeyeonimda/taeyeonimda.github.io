@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
 
-from prompts import SYSTEM_INSTRUCTION, build_track_a_prompt, build_track_b_prompt
+from prompts import build_system_instruction, build_track_a_prompt, build_track_b_prompt
 
 # 경로 설정
 AUTOMATION_DIR = Path(__file__).resolve().parent
@@ -280,24 +280,25 @@ def call_gemini(
     gemini-2.5-flash로 자동 폴백(Fallback)하여 안정적으로 글을 생성합니다.
     반환값: (생성된 마크다운 텍스트, 실제 사용된 모델명)
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다. "
-            "GitHub Secrets 또는 로컬 환경변수에 GEMINI_API_KEY를 설정해 주세요."
+            "GitHub Secrets(Settings -> Secrets and variables -> Actions)에 GEMINI_API_KEY를 설정해 주세요."
         )
 
     client = genai.Client(api_key=api_key)
-    system_instruction = SYSTEM_INSTRUCTION.format(
+    system_instruction = build_system_instruction(
         date_str=date_str,
         main_category=main_category,
         sub_category=sub_category,
     )
 
-    # 우선 시도할 모델 리스트 구성 (기본: gemini-2.5-pro -> gemini-2.5-flash 폴백)
+    # 우선 시도할 모델 리스트 구성 (기본: gemini-2.5-pro -> gemini-2.5-flash -> gemini-2.0-flash 폴백)
     candidate_models = [model_name]
-    if model_name == "gemini-2.5-pro":
-        candidate_models.append("gemini-2.5-flash")
+    for fallback_model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+        if fallback_model not in candidate_models:
+            candidate_models.append(fallback_model)
 
     last_error: Optional[Exception] = None
     for current_model in candidate_models:
