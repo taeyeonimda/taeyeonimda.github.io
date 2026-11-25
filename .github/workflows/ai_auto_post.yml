@@ -1,0 +1,101 @@
+name: "AI Auto Blog Post (Two-Track)"
+
+on:
+  # 매일 오전 9시(KST 기준 = UTC 00:00) 자동 실행
+  schedule:
+    - cron: "0 0 * * *"
+
+  # GitHub Actions 탭에서 수동 실행 가능 (옵션 선택 지원)
+  workflow_dispatch:
+    inputs:
+      publish_mode:
+        description: "배포 방식 (pr: 나만 먼저 검수 후 Merge 시 배포 / direct: 즉시 배포)"
+        required: true
+        default: "pr"
+        type: choice
+        options:
+          - pr
+          - direct
+      track:
+        description: "글 생성 트랙 (auto: 자동 교차 / b: 커리큘럼 시리즈 / a: 해외·최신 RSS 해설)"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - b
+          - a
+      custom_topic:
+        description: "(선택) 직접 지정할 주제 — 입력 시 해당 주제로 즉시 작성"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  generate-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "_automation/requirements.txt"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r _automation/requirements.txt
+
+      - name: Generate AI blog post
+        id: generate
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TRACK_INPUT: ${{ inputs.track || 'auto' }}
+          TOPIC_INPUT: ${{ inputs.custom_topic || '' }}
+        run: |
+          if [ -n "$TOPIC_INPUT" ]; then
+            python _automation/generate_post.py --track "$TRACK_INPUT" --topic "$TOPIC_INPUT"
+          else
+            python _automation/generate_post.py --track "$TRACK_INPUT"
+          fi
+
+      # [기본 모드: PR 검수 방식] 새 브랜치에 커밋하고 Pull Request를 생성하여 내가 먼저 확인 후 Merge할 때만 최종 배포
+      - name: Create Pull Request for Review (Preview Mode)
+        if: ${{ (inputs.publish_mode || 'pr') == 'pr' }}
+        id: cpr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "docs(post): add ${{ steps.generate.outputs.post_title }}"
+          branch: "ai-post/${{ steps.generate.outputs.post_slug }}"
+          delete-branch: true
+          title: "📝 [AI 포스트 검수] ${{ steps.generate.outputs.post_title }}"
+          body-path: "_automation/last_run_summary.md"
+          labels: |
+            ai-post
+            review-ready
+
+      # [즉시 배포 모드] workflow_dispatch에서 direct를 선택한 경우 main 브랜치에 바로 푸시하고 배포 실행
+      - name: Direct Commit & Push to Main (Direct Publish Mode)
+        if: ${{ inputs.publish_mode == 'direct' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POST_TITLE: ${{ steps.generate.outputs.post_title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add _posts/ _automation/curriculum.json _automation/posted_history.json
+          git commit -m "docs(post): add ${POST_TITLE}"
+          git push origin HEAD
+          gh workflow run pages-deploy.yml
