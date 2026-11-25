@@ -267,8 +267,19 @@ def ensure_valid_front_matter(
     return front_matter + safe_body + "\n", title
 
 
-def call_gemini(prompt: str, date_str: str, main_category: str, sub_category: str, model_name: str) -> str:
-    """Gemini API를 호출하여 블로그 포스트 마크다운을 생성합니다."""
+def call_gemini(
+    prompt: str,
+    date_str: str,
+    main_category: str,
+    sub_category: str,
+    model_name: str,
+) -> Tuple[str, str]:
+    """
+    Gemini API를 호출하여 블로그 포스트 마크다운을 생성합니다.
+    기본적으로 gemini-2.5-pro를 우선 시도하고, 할당량(Quota) 초과나 일시적 오류 발생 시
+    gemini-2.5-flash로 자동 폴백(Fallback)하여 안정적으로 글을 생성합니다.
+    반환값: (생성된 마크다운 텍스트, 실제 사용된 모델명)
+    """
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -283,19 +294,32 @@ def call_gemini(prompt: str, date_str: str, main_category: str, sub_category: st
         sub_category=sub_category,
     )
 
-    print(f"[AI] Gemini 모델({model_name})로 포스트 작성 중...")
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=0.65,
-        ),
-    )
+    # 우선 시도할 모델 리스트 구성 (기본: gemini-2.5-pro -> gemini-2.5-flash 폴백)
+    candidate_models = [model_name]
+    if model_name == "gemini-2.5-pro":
+        candidate_models.append("gemini-2.5-flash")
 
-    if not response.text:
-        raise RuntimeError("Gemini API로부터 빈 응답을 받았습니다.")
-    return response.text
+    last_error: Optional[Exception] = None
+    for current_model in candidate_models:
+        try:
+            print(f"[AI] Gemini 모델({current_model})로 포스트 작성 시도 중...")
+            response = client.models.generate_content(
+                model=current_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.65,
+                ),
+            )
+            if response.text:
+                print(f"[AI] {current_model} 모델로 포스트 생성 성공!")
+                return response.text, current_model
+            raise RuntimeError(f"{current_model} 모델로부터 빈 응답을 받았습니다.")
+        except Exception as exc:
+            last_error = exc
+            print(f"[WARN] {current_model} 호출 실패 ({exc}). 다음 폴백 모델로 전환을 시도합니다...")
+
+    raise RuntimeError(f"모든 Gemini 모델 호출에 실패했습니다: {last_error}")
 
 
 def write_github_outputs(outputs: Dict[str, str], summary_md: str) -> None:
@@ -342,8 +366,8 @@ def main() -> int:
     parser.add_argument(
         "--model",
         type=str,
-        default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        help="사용할 Gemini 모델명 (기본값: gemini-2.5-flash)",
+        default=os.environ.get("GEMINI_MODEL", "gemini-2.5-pro"),
+        help="우선 사용할 Gemini 모델명 (기본값: gemini-2.5-pro, 한도 초과 시 gemini-2.5-flash로 자동 폴백)",
     )
     args = parser.parse_args()
 
@@ -442,8 +466,8 @@ def main() -> int:
         print(prompt[:1500] + "\n...(생략)...")
         return 0
 
-    # Gemini 호출 및 마크다운 생성
-    raw_markdown = call_gemini(prompt, date_str, main_cat, sub_cat, args.model)
+    # Gemini 호출 및 마크다운 생성 (gemini-2.5-pro 우선 -> gemini-2.5-flash 폴백)
+    raw_markdown, used_model = call_gemini(prompt, date_str, main_cat, sub_cat, args.model)
     final_markdown, final_title = ensure_valid_front_matter(
         raw_md=raw_markdown,
         default_title=default_title,
@@ -502,6 +526,7 @@ def main() -> int:
 
 - **제목**: **{final_title}**
 - **트랙**: {track_label}
+- **작성 AI 모델**: `{used_model}`
 - **카테고리**: `{main_cat}` > `{sub_cat}`
 - **생성 파일**: `{rel_path}`
 - **생성 시각(KST)**: `{date_str}`
