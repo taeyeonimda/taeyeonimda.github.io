@@ -1,0 +1,6 @@
+User-agent: *
+
+Disallow: /norobots/
+Disallow: /pr-preview/
+
+Sitemap: https://taeyeonimda.github.io/pr-preview/pr-2/sitemap.xml
