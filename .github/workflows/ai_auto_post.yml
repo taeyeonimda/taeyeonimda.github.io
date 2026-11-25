@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_mode:
-        description: "배포 방식 (pr: 나만 먼저 검수 후 Merge 시 배포 / direct: 즉시 배포)"
+        description: "배포 방식 (pr: 나만 먼저 테스트 링크로 검수 후 Merge 시 배포 / direct: 즉시 배포)"
         required: true
         default: "pr"
         type: choice
@@ -34,6 +34,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: write
 
 jobs:
@@ -70,7 +71,7 @@ jobs:
             python _automation/generate_post.py --track "$TRACK_INPUT"
           fi
 
-      # [기본 모드: PR 검수 방식] 새 브랜치에 커밋하고 Pull Request를 생성하여 내가 먼저 확인 후 Merge할 때만 최종 배포
+      # [기본 모드: PR 검수 방식] 새 브랜치에 커밋하고 Pull Request 생성
       - name: Create Pull Request for Review (Preview Mode)
         if: ${{ (inputs.publish_mode || 'pr') == 'pr' }}
         id: cpr
@@ -82,6 +83,78 @@ jobs:
           delete-branch: true
           title: "📝 [AI 포스트 검수] ${{ steps.generate.outputs.post_title }}"
           body-path: "_automation/last_run_summary.md"
+
+      # PR 전용 실제 블로그 미리보기(Preview) 빌드용 Ruby 준비
+      - name: Setup Ruby for PR Preview
+        if: ${{ (inputs.publish_mode || 'pr') == 'pr' && steps.cpr.outputs.pull-request-number != '' }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.3
+          bundler-cache: true
+
+      # PR 전용 미리보기 빌드 + pr-previews 브랜치 저장 + PR 댓글로 테스트 링크 안내
+      - name: Build PR Preview & Comment Preview URL
+        if: ${{ (inputs.publish_mode || 'pr') == 'pr' && steps.cpr.outputs.pull-request-number != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+          PR_BRANCH: "ai-post/${{ steps.generate.outputs.post_slug }}"
+          POST_SLUG: ${{ steps.generate.outputs.post_slug }}
+        run: |
+          set -e
+          git fetch origin "${PR_BRANCH}"
+          git checkout "${PR_BRANCH}"
+
+          printf "pwa:\n  enabled: false\n" > _config_preview.yml
+          JEKYLL_ENV=production bundle exec jekyll b \
+            --config _config.yml,_config_preview.yml \
+            -b "/pr-preview/pr-${PR_NUMBER}" \
+            -d "/tmp/pr_preview_site"
+          rm -f _config_preview.yml
+
+          POST_URL_PATH="posts/${POST_SLUG}/"
+          if [ ! -d "/tmp/pr_preview_site/posts/${POST_SLUG}" ]; then
+            FIRST_POST_DIR=$(ls -1 /tmp/pr_preview_site/posts 2>/dev/null | head -n 1 || true)
+            if [ -n "$FIRST_POST_DIR" ]; then
+              POST_URL_PATH="posts/${FIRST_POST_DIR}/"
+            fi
+          fi
+
+          WORK_DIR="/tmp/pr_previews_repo"
+          rm -rf "${WORK_DIR}"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${WORK_DIR}"
+          cd "${WORK_DIR}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin pr-previews >/dev/null 2>&1; then
+            git fetch origin pr-previews --depth 1
+            git checkout -B pr-previews FETCH_HEAD
+          else
+            git checkout --orphan pr-previews
+            git rm -rf . >/dev/null 2>&1 || true
+            rm -rf ./*
+          fi
+
+          mkdir -p "pr-preview"
+          rm -rf "pr-preview/pr-${PR_NUMBER}"
+          cp -R "/tmp/pr_preview_site" "pr-preview/pr-${PR_NUMBER}"
+          touch .nojekyll
+
+          git add -A
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(preview): update preview for PR #${PR_NUMBER}"
+            git push origin pr-previews
+          fi
+
+          cd "${GITHUB_WORKSPACE}"
+          gh workflow run pages-deploy.yml
+
+          export SITE_ROOT="https://${GITHUB_REPOSITORY_OWNER}.github.io"
+          export PREVIEW_HOME="${SITE_ROOT}/pr-preview/pr-${PR_NUMBER}/"
+          export PREVIEW_POST="${PREVIEW_HOME}${POST_URL_PATH}"
+          python3 _automation/build_pr_comment.py
+          gh pr comment "${PR_NUMBER}" --body-file /tmp/pr_comment.md
 
       # [즉시 배포 모드] workflow_dispatch에서 direct를 선택한 경우 main 브랜치에 바로 푸시하고 배포 실행
       - name: Direct Commit & Push to Main (Direct Publish Mode)
