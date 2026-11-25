@@ -7,14 +7,22 @@
     "title": "엔터프라이즈 환경을 위한 Apex Trigger Framework 설계와 Bulkification 완벽 가이드",
     "main_category": "Salesforce",
     "sub_category": "Apex",
-    "keywords": ["apex", "trigger-framework", "bulkification", "governor-limits", "salesforce"],
+    "keywords": [
+      "apex",
+      "trigger-framework",
+      "bulkification",
+      "governor-limits",
+      "salesforce"
+    ],
     "key_points": [
       "One Trigger Per Object 원칙이 필요한 이유와 실행 순서 보장 문제",
       "Trigger Handler 패턴 구조 설계 및 재귀 호출(Recursion) 방지 메커니즘",
       "For 루프 내부 SOQL/DML 안티 패턴과 Map/Set 컬렉션을 활용한 Bulkification 베스트 프랙티스",
       "Trigger Bypass(비활성화 스위치)를 Custom Metadata Types로 구현하는 실전 코드"
     ],
-    "completed": false
+    "completed": true,
+    "completed_at": "2026-11-25 13:41:54 +0900",
+    "post_file": "_posts/2026-11-25-salesforce-apex-trigger-framework-best-practices.md"
   },
   {
     "id": "sf-apex-02",
@@ -24,7 +32,13 @@
     "title": "비동기 Apex 완전 정복: @future, Queueable, Batch Apex, Scheduled Apex 선택 기준과 체이닝 패턴",
     "main_category": "Salesforce",
     "sub_category": "Apex",
-    "keywords": ["asynchronous-apex", "queueable", "batch-apex", "governor-limits", "salesforce"],
+    "keywords": [
+      "asynchronous-apex",
+      "queueable",
+      "batch-apex",
+      "governor-limits",
+      "salesforce"
+    ],
     "key_points": [
       "동기(Synchronous) vs 비동기(Asynchronous) Governor Limits 차이점 비교",
       "@future의 한계와 Queueable Apex가 실무 표준으로 자리잡은 이유 (Non-primitive 타입 전달, Job Chaining)",
@@ -41,7 +55,13 @@
     "title": "대용량 데이터(LDV) 환경에서의 SOQL 쿼리 성능 최적화와 Query Plan 분석 실무",
     "main_category": "Salesforce",
     "sub_category": "SOQL & Data",
-    "keywords": ["soql", "ldv", "query-optimization", "selective-query", "salesforce"],
+    "keywords": [
+      "soql",
+      "ldv",
+      "query-optimization",
+      "selective-query",
+      "salesforce"
+    ],
     "key_points": [
       "Large Data Volume(LDV) 환경에서 Non-Selective Query 에러가 발생하는 원리와 인덱스 임계값(Threshold)",
       "Developer Console Query Plan Tool을 활용해 Cardinality와 Cost를 읽는 방법",
@@ -58,7 +78,13 @@
     "title": "LWC 컴포넌트 통신 아키텍처 총정리: Parent-Child, CustomEvent, Lightning Message Service(LMS)",
     "main_category": "Salesforce",
     "sub_category": "LWC",
-    "keywords": ["lwc", "lightning-web-components", "lms", "custom-event", "frontend"],
+    "keywords": [
+      "lwc",
+      "lightning-web-components",
+      "lms",
+      "custom-event",
+      "frontend"
+    ],
     "key_points": [
       "컴포넌트 계층 구조에 따른 통신 방식 선택 기준 다이어그램",
       "@api 프로퍼티/메서드를 통한 부모→자식 단방향 데이터 흐름과 불변성(Immutability) 주의점",
@@ -75,7 +101,13 @@
     "title": "LWC 데이터 바인딩 심층 분석: @wire 서비스 vs Imperative Apex 호출과 refreshApex 캐시 전략",
     "main_category": "Salesforce",
     "sub_category": "LWC",
-    "keywords": ["lwc", "wire-service", "refresh-apex", "lds", "cacheable"],
+    "keywords": [
+      "lwc",
+      "wire-service",
+      "refresh-apex",
+      "lds",
+      "cacheable"
+    ],
     "key_points": [
       "Lightning Data Service(LDS) 기반 @wire의 반응형(Reactive) 동작 원리와 클라이언트 캐싱",
       "@AuraEnabled(cacheable=true) 사용 시 DML 제약사항과 refreshApex()가 제대로 동작하지 않는 흔한 실수 해결",
@@ -92,7 +124,13 @@
     "title": "Record-Triggered Flow vs Apex Trigger: 엔터프라이즈 프로젝트에서의 아키텍처 의사결정 기준",
     "main_category": "Salesforce",
     "sub_category": "Architecture",
-    "keywords": ["flow", "apex-trigger", "architecture", "order-of-execution", "salesforce"],
+    "keywords": [
+      "flow",
+      "apex-trigger",
+      "architecture",
+      "order-of-execution",
+      "salesforce"
+    ],
     "key_points": [
       "Salesforce Save Order of Execution(저장 실행 순서)에서 Before/After Flow와 Apex Trigger의 정확한 실행 타이밍",
       "Low-Code(Flow) 만능주의의 함정: 복잡한 루프, CPU Time Limit, 디버깅 및 Git 버전 관리 난이도",
@@ -109,7 +147,13 @@
     "title": "안전하고 견고한 Salesforce 외부 시스템 연동: Named Credentials, Callout 제한 및 비동기 재시도 아키텍처",
     "main_category": "Salesforce",
     "sub_category": "Integration",
-    "keywords": ["integration", "named-credentials", "rest-api", "callout", "platform-events"],
+    "keywords": [
+      "integration",
+      "named-credentials",
+      "rest-api",
+      "callout",
+      "platform-events"
+    ],
     "key_points": [
       "하드코딩된 인증 정보를 제거하기 위한 External Credentials & Named Credentials 아키텍처",
       "Uncommitted Work Pending 에러가 발생하는 이유와 DML-Callout 트랜잭션 분리 패턴",
@@ -126,7 +170,13 @@
     "title": "Apex 보안 취약점 완벽 방어: with sharing, stripInaccessible, 그리고 Database User Mode(WITH USER_MODE)",
     "main_category": "Salesforce",
     "sub_category": "Security",
-    "keywords": ["security", "with-sharing", "user-mode", "fls", "crud"],
+    "keywords": [
+      "security",
+      "with-sharing",
+      "user-mode",
+      "fls",
+      "crud"
+    ],
     "key_points": [
       "System Mode vs User Mode: Apex가 기본적으로 객체 권한(CRUD)과 필드 보안(FLS)을 무시하는 이유",
       "with sharing / without sharing / inherited sharing 키워드의 정확한 동작 방식과 내부 클래스 상속 규칙",
@@ -143,7 +193,13 @@
     "title": "Salesforce DX(sf CLI)와 GitHub Actions를 활용한 자동화된 CI/CD 배포 파이프라인 구축",
     "main_category": "IT & Cloud",
     "sub_category": "DevOps & CI/CD",
-    "keywords": ["ci-cd", "github-actions", "sfdx", "devops", "deployment"],
+    "keywords": [
+      "ci-cd",
+      "github-actions",
+      "sfdx",
+      "devops",
+      "deployment"
+    ],
     "key_points": [
       "Change Sets 방식의 한계와 Git 기반 Source-Driven Development(SFDX)로의 전환",
       "JWT Bearer Flow를 이용한 무인(Headless) Salesforce Org 인증 구성",
@@ -160,7 +216,13 @@
     "title": "엔터프라이즈 AI 에이전트 아키텍처: Salesforce Agentforce와 RAG(검색 증강 생성) 기반 실무 설계",
     "main_category": "IT & Cloud",
     "sub_category": "AI & Architecture",
-    "keywords": ["agentforce", "ai-agent", "rag", "llm", "enterprise-ai"],
+    "keywords": [
+      "agentforce",
+      "ai-agent",
+      "rag",
+      "llm",
+      "enterprise-ai"
+    ],
     "key_points": [
       "단순 챗봇과 자율형 AI 에이전트(Reasoning Engine, Topic, Action)의 아키텍처 차이",
       "엔터프라이즈 CRM 데이터를 LLM에 안전하게 연결할 때의 데이터 마스킹과 보안(Einstein Trust Layer) 원리",

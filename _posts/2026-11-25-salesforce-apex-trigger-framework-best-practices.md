@@ -1,0 +1,381 @@
+---
+title: "엔터프라이즈 Apex Trigger Framework 설계 및 Bulkification 완벽 가이드 | Salesforce Apex 엔터프라이즈 아키텍처 #1"
+description: "대규모 Salesforce 엔터프라이즈 환경을 위한 Apex Trigger Framework 설계 기법, Bulkification 핵심 패턴, Custom Metadata 기반 Bypass 및 재귀 방지 메커니즘을 심도 있게 다룹니다."
+date: 2026-11-25 13:41:54 +0900
+categories: ["Salesforce", "Apex"]
+tags: ["apex", "trigger-framework", "bulkification", "governor-limits", "salesforce"]
+mermaid: true
+toc: true
+---
+
+## 서론: 대규모 엔터프라이즈 환경에서 왜 Apex Trigger 아키텍처가 중요한가?
+
+Salesforce 프로젝트의 규모가 커지고 복잡성이 증가함에 따라 개발팀이 가장 자주 직면하는 성능 및 유지보수 문제는 대부분 **잘못 설계된 Apex Trigger**와 **Bulkification(대량 처리)의 부재**에서 시작됩니다. 
+
+실무에서 데이터 로더(Data Loader)나 Batch Apex를 통해 10,000건의 고객(Account) 데이터를 Update할 때 다음과 같은 에러를 마주한 경험이 있으실 것입니다.
+
+```text
+System.LimitException: Too many SOQL queries: 101
+System.LimitException: Maximum trigger depth exceeded
+```
+
+이러한 문제가 발생하는 근본적인 이유는 Salesforce의 트랜잭션 제한(Governor Limits)과 Execution Context(실행 컨텍스트)에 대한 이해 부족, 그리고 체계화된 **Trigger Framework** 없이 개발자마다 파편화된 코드 구조를 작성했기 때문입니다.
+
+본 포스트에서는 시니어 아키텍트 관점에서 엔터프라이즈 Salesforce 환경에 필수적인 **One Trigger Per Object 원칙**, **Trigger Handler 패턴**, **재귀 호출(Recursion) 제어**, **Map/Set 기반의 완벽한 Bulkification**, 그리고 **Custom Metadata Types를 활용한 Trigger Bypass(비활성화) 스위치 구현**까지 실무 코드와 다이어그램을 통해 깊이 있게 다룹니다.
+
+---
+
+## 1. Apex Trigger 설계의 3대 핵심 원칙
+
+### 1) One Trigger Per Object (객체당 단 하나의 트리거)
+하나의 SObject(예: `Account`)에 여러 개의 Trigger 파일(`AccountTrigger1.trigger`, `AccountTrigger2.trigger`)이 존재할 경우, Salesforce는 이들의 **실행 순서를 보장하지 않습니다.** 
+
+동일한 `before update` 이벤트에서 어느 트리거가 먼저 실행될지 알 수 없으므로, 데이터 정합성 오류 및 사이드 이펙트 분석이 불가능해집니다. 따라서 객체당 오직 **단 하나**의 Trigger 파일만 존재해야 하며, 해당 파일은 로직을 포함하지 않고 오직 라우팅 역할만 수행해야 합니다.
+
+### 2) Separation of Concerns (관심사의 분리)
+*.trigger 파일에는 비즈니스 로직을 단 한 줄도 작성하지 않는 것이 철칙입니다.
+- **Trigger**: 이벤트 감지 및 Router 호출
+- **Trigger Handler**: 실행 컨텍스트(Before/After, Insert/Update 등) 조건 분기 및 순서 제어
+- **Service Layer (Domain Class)**: 실질적인 엔터프라이즈 비즈니스 로직 수행
+
+### 3) Bulkification by Default (기본 대량 처리)
+Apex Trigger는 단 1건의 레코드 생성부터 200건의 청크(Chunk) 단위 대량 트랜잭션까지 동일하게 동작합니다. 모든 코드는 `Trigger.new`의 개수가 200개라는 전제 하에 작성되어야 합니다.
+
+---
+
+## 2. 엔터프라이즈 Trigger Framework 아키텍처 흐름
+
+구현할 프레임워크의 내부 동작 구조를 시각화하면 다음과 같습니다. 트랜잭션이 시작되면 Bypass 검사, 재귀 실행 검사, 이벤트 라우팅, 비즈니스 서비스 호출 순으로 안전하게 처리됩니다.
+
+```mermaid
+flowchart TD
+    A["DML Event (Data Loader / UI / API)"] --> B["AccountTrigger.trigger (Single Entry Point)"]
+    B --> C{"Custom Metadata Bypass Check"}
+    C -- "Bypassed (True)" --> Z["End Execution"]
+    C -- "Active (False)" --> D["AccountTriggerHandler.cls (Extends TriggerHandler)"]
+    D --> E{"Recursion Guard Check"}
+    E -- "Already Processed" --> Z
+    E -- "First Run" --> F{"Trigger Context Check"}
+    F -- "Before Insert" --> G["AccountService.validateData()"]
+    F -- "After Update" --> H["AccountService.syncChildContacts()"]
+    G --> I["DML / SOQL Execution (Bulkified)"]
+    H --> I
+    I --> Z
+```
+
+---
+
+## 3. Bulkification: Anti-Pattern vs Best Practice
+
+가장 흔하게 발생하는 Governor Limit 오류(`SOQL 101`, `DML 150`)를 일으키는 나쁜 코드와 이를 개선한 실무 베스트 프랙티스를 비교해 보겠습니다.
+
+### ⚠️ Anti-Pattern (안티 패턴: Loop 내부 SOQL 및 DML)
+
+```apex
+// [Bad Case] Loop 내부에서 SOQL과 DML을 호출하는 전형적인 오작동 코드
+public class BadAccountHandler {
+    public static void handleAfterUpdate(List<Account> newAccounts) {
+        for (Account acc : newAccounts) {
+            // ❌ 1. 루프 내부에서 SOQL 실행 (200건 업데이트 시 SOQL 200회 호출로 Limit 101 초과!)
+            List<Contact> contacts = [SELECT Id, Phone FROM Contact WHERE AccountId = :acc.Id];
+            
+            for (Contact con : contacts) {
+                con.Phone = acc.Phone;
+                // ❌ 2. 루프 내부에서 DML 실행 (DML Limit 150 초과!)
+                update con;
+            }
+        }
+    }
+}
+```
+
+> **왜 위험한가?**
+> Salesforce 트랜잭션 당 허용되는 동기 SOQL 쿼리 개수는 최대 **101개**, DML 문은 최대 **150개**입니다. 위 코드는 데이터 200건이 들어오는 순간 100번째 루프에서 시스템 런타임 예외를 발생시키며 전체 트랜잭션을 롤백시킵니다.
+{: .prompt-danger }
+
+### ✅ Best Practice (베스트 프랙티스: Set/Map 컬렉션 활용 대량 처리)
+
+```apex
+// [Good Case] Set/Map을 활용하여 SOQL 1회, DML 1회로 Bulkification을 완료한 표준 코드
+public class GoodAccountService {
+    public static void syncContactPhones(List<Account> updatedAccounts, Map<Id, Account> oldAccountMap) {
+        Set<Id> accountIdsToUpdate = new Set<Id>();
+        
+        // 1. 실제 전화번호가 변경된 Account의 ID만 추려냄 (불필요한 I/O 방지)
+        for (Account acc : updatedAccounts) {
+            Account oldAcc = oldAccountMap.get(acc.Id);
+            if (acc.Phone != oldAcc.Phone) {
+                accountIdsToUpdate.add(acc.Id);
+            }
+        }
+        
+        // 처리할 대상이 없으면 조기 리턴 (Early Exit)
+        if (accountIdsToUpdate.isEmpty()) {
+            return;
+        }
+        
+        // 2. Loop 외부에서 단 1회의 SOQL로 연관된 모든 Contact 조회
+        List<Contact> contactsToUpdate = [
+            SELECT Id, Phone, AccountId 
+            FROM Contact 
+            WHERE AccountId IN :accountIdsToUpdate
+            WITH USER_MODE
+        ];
+        
+        // 3. Map을 활용하여 메모리 상에서 매핑 처리
+        Map<Id, Account> accountMap = new Map<Id, Account>(updatedAccounts);
+        
+        for (Contact con : contactsToUpdate) {
+            Account parentAccount = accountMap.get(con.AccountId);
+            if (parentAccount != null) {
+                con.Phone = parentAccount.Phone;
+            }
+        }
+        
+        // 4. Loop 외부에서 단 1회의 DML로 대량 업데이트 수행
+        if (!contactsToUpdate.isEmpty()) {
+            update contactsToUpdate;
+        }
+    }
+}
+```
+
+#### 코드 핵심 하이라이트:
+1. **Change Tracking**: `oldAccountMap`과 비교하여 **실제 변경이 일어난 레코드 ID만 `Set<Id>`에 수집**합니다.
+2. **Bulk Querying**: `WHERE AccountId IN :accountIdsToUpdate` 구문을 사용해 루프 바깥에서 단 1회의 SOQL로 데이터를 가져옵니다.
+3. **Bulk DML**: 수정된 Contact 수천 건을 `List<Contact>`에 담아 루프 바깥에서 단 1회의 `update` DML로 처리합니다.
+
+---
+
+## 4. 실무형 Apex Trigger Framework 구현
+
+이제 엔터프라이즈 시스템에 즉시 적용 가능한 완성형 Trigger Framework를 구현합니다.
+
+### 1) Virtual Base TriggerHandler (기반 클래스)
+
+모든 오브젝트 핸들러가 상속받을 공통 인터페이스 및 가상 클래스입니다. 재귀 호출 방지 및 컨텍스트 제어 로직을 내장합니다.
+
+```apex
+/**
+ * @description 엔터프라이즈 Apex Trigger Handler 가상 클래스
+ * @author Senior Salesforce Architect
+ */
+public virtual class TriggerHandler {
+    // 트랜잭션 단위 재귀 호출 방지를 위한 실행 횟수 저장소
+    private static Set<String> linesExecuted = new Set<String>();
+    
+    // 현재 실행 중인 핸들러의 컨텍스트 상태
+    @TestVisible
+    private TriggerContext context;
+
+    @TestVisible
+    private Boolean isTriggerExecuting;
+
+    public enum TriggerContext {
+        BEFORE_INSERT, BEFORE_UPDATE, BEFORE_DELETE,
+        AFTER_INSERT, AFTER_UPDATE, AFTER_DELETE, AFTER_UNDELETE
+    }
+
+    public TriggerHandler() {
+        this.setTriggerContext();
+    }
+
+    // 메인 실행 제어 메서드
+    public void run() {
+        // 1. Dynamic Custom Metadata Bypass 체크
+        if (TriggerBypassManager.isBypassed(getHandlerName())) {
+            return;
+        }
+
+        // 2. 실행 컨텍스트에 따른 가상 메서드 호출
+        switch on this.context {
+            when BEFORE_INSERT { this.beforeInsert(); }
+            when BEFORE_UPDATE { this.beforeUpdate(); }
+            when BEFORE_DELETE { this.beforeDelete(); }
+            when AFTER_INSERT { this.afterInsert(); }
+            when AFTER_UPDATE { this.afterUpdate(); }
+            when AFTER_DELETE { this.afterDelete(); }
+            when AFTER_UNDELETE { this.afterUndelete(); }
+        }
+    }
+
+    // 자식 클래스에서 오버라이드할 가상 메서드들
+    protected virtual void beforeInsert() {}
+    protected virtual void beforeUpdate() {}
+    protected virtual void beforeDelete() {}
+    protected virtual void afterInsert() {}
+    protected virtual void afterUpdate() {}
+    protected virtual void afterDelete() {}
+    protected virtual void afterUndelete() {}
+
+    // 재귀 호출 방지 헬퍼 (동일 트랜잭션 내 1회만 실행 보장)
+    public static Boolean isFirstRun(String handlerName, String contextEvent) {
+        String key = handlerName + ':' + contextEvent;
+        if (linesExecuted.contains(key)) {
+            return false;
+        }
+        linesExecuted.add(key);
+        return true;
+    }
+
+    // 테스트 코드 등에서 재귀 상태 초기화 필요 시 활용
+    public static void clearLoopCount() {
+        linesExecuted.clear();
+    }
+
+    private void setTriggerContext() {
+        this.isTriggerExecuting = Trigger.isExecuting;
+        if (!this.isTriggerExecuting) return;
+
+        if (Trigger.isBefore && Trigger.isInsert) this.context = TriggerContext.BEFORE_INSERT;
+        else if (Trigger.isBefore && Trigger.isUpdate) this.context = TriggerContext.BEFORE_UPDATE;
+        else if (Trigger.isBefore && Trigger.isDelete) this.context = TriggerContext.BEFORE_DELETE;
+        else if (Trigger.isAfter && Trigger.isInsert) this.context = TriggerContext.AFTER_INSERT;
+        else if (Trigger.isAfter && Trigger.isUpdate) this.context = TriggerContext.AFTER_UPDATE;
+        else if (Trigger.isAfter && Trigger.isDelete) this.context = TriggerContext.AFTER_DELETE;
+        else if (Trigger.isAfter && Trigger.isUndelete) this.context = TriggerContext.AFTER_UNDELETE;
+    }
+
+    private String getHandlerName() {
+        return String.valueOf(this).split(':')[0];
+    }
+}
+```
+
+### 2) Dynamic Trigger Bypass Manager (Custom Metadata 기반)
+
+배포 없이 **대량 데이터 이관(Migration)**이나 **특정 인터페이스 작업 시** 특정 트리거를 비활성화할 수 있도록 설계된 스위치 관리자입니다.
+
+> **Custom Metadata Type 구조 (`Trigger_Setting__mdt`)**
+> - `MasterLabel`: Object/Handler Name (예: `AccountTriggerHandler`)
+> - `Is_Active__c`: Checkbox (Checked: 실행, Unchecked: 바이패스)
+> - `Bypass_Users__c`: Long Text (특정 User Username/Id 목록)
+{: .prompt-info }
+
+```apex
+/**
+ * @description Dynamic Trigger Bypass 관리 클래스
+ */
+public class TriggerBypassManager {
+    // 세션 메모리 캐싱 (동일 트랜잭션 내 불필요한 CMDT SOQL 방지)
+    private static Set<String> disabledHandlers = new Set<String>();
+    private static Boolean isInitialized = false;
+
+    private static void initialize() {
+        if (isInitialized) return;
+        
+        // Custom Metadata에서 비활성화된 Trigger 목록 조회
+        for (Trigger_Setting__mdt setting : [
+            SELECT DeveloperName, Is_Active__c 
+            FROM Trigger_Setting__mdt 
+            WHERE Is_Active__c = false
+        ]) {
+            disabledHandlers.add(setting.DeveloperName);
+        }
+        isInitialized = true;
+    }
+
+    public static Boolean isBypassed(String handlerName) {
+        initialize();
+        // 런타임 메모리 바이패스 목록 조망 및 Custom Metadata 상태 검사
+        return disabledHandlers.contains(handlerName);
+    }
+
+    // 런타임 코드상에서 동적으로 바이패스 설정 (예: Batch Apex 내부)
+    public static void bypass(String handlerName) {
+        disabledHandlers.add(handlerName);
+    }
+
+    public static void clearBypass(String handlerName) {
+        disabledHandlers.remove(handlerName);
+    }
+}
+```
+
+### 3) 구체적인 Object Handler 구현 (`AccountTriggerHandler.cls`)
+
+```apex
+/**
+ * @description Account 전용 Trigger Handler 클래스
+ */
+public class AccountTriggerHandler extends TriggerHandler {
+    
+    private List<Account> newAccounts;
+    private Map<Id, Account> oldAccountMap;
+
+    public AccountTriggerHandler() {
+        this.newAccounts = (List<Account>) Trigger.new;
+        this.oldAccountMap = (Map<Id, Account>) Trigger.oldMap;
+    }
+
+    override protected void beforeInsert() {
+        // Validation 및 데이터 가공 로직
+        AccountDomainService.setDefaultValues(this.newAccounts);
+    }
+
+    override protected void afterUpdate() {
+        // 재귀 실행 방지 검사 (After Update 이벤트 1회 보장)
+        if (!TriggerHandler.isFirstRun('AccountTriggerHandler', 'afterUpdate')) {
+            return;
+        }
+
+        // 비즈니스 서비스 레이어 호스트
+        GoodAccountService.syncContactPhones(this.newAccounts, this.oldAccountMap);
+    }
+}
+```
+
+### 4) 단일 진입점 Trigger 파일 (`AccountTrigger.trigger`)
+
+```apex
+/**
+ * @description Account 오브젝트 단일 트리거 엔트리 포인트
+ */
+trigger AccountTrigger on Account (
+    before insert, before update, before delete,
+    after insert, after update, after delete, after undelete
+) {
+    // 핸들러 생성 및 실행 (단 한 줄로 완결)
+    new AccountTriggerHandler().run();
+}
+```
+
+---
+
+## 5. Salesforce Governor Limits & 거버넌스 가이드
+
+트리거 설계 시 개발자와 아키텍트가 반드시 준수해야 하는 주요 Governor Limit 현황입니다.
+
+| 항목 (Limit Metric) | Synchronous (동기) 제한 | Asynchronous (비동기) 제한 | 주요 위험 요소 및 조치 방안 |
+| :--- | :--- | :--- | :--- |
+| **Total SOQL Issued** | **101개** | 200개 | Loop 내부 SOQL 금지. Set/Map 기반 Collection 사용 |
+| **Total DML Statements** | **150개** | 150개 | Loop 내부 `insert/update/delete` 금지. List 단위 처리 |
+| **Total Records Processed via DML** | **10,000건** | 10,000건 | 대량 데이터 건은 Batch Apex 분산 처리 고려 |
+| **Maximum CPU Time** | **10,000 ms** | 60,000 ms | 루프 이중 중첩(`O(N^2)`) 피하고 Map 조회(`O(1)`) 활용 |
+| **Heap Size** | **6 MB** | 12 MB | 대량 SOQL 조회 시 전체 쿼리 대신 필요 필드만 Select |
+
+---
+
+## 6. 코드 리뷰 체크리스트 (Code Review Checklist)
+
+트리거 코드를 메인 브랜치에 Merge하기 전, 다음 체크리스트를 통해 품질을 검증하세요.
+
+> **Triggers & Architecture Review Checklist**
+> - [ ] 해당 SObject에 Trigger 파일이 **단 하나만** 존재하는가?
+> - [ ] Trigger 파일 내부에는 비즈니스 로직 없이 `TriggerHandler.run()` 호출만 존재하는가?
+> - [ ] `for` 문 또는 `while` 문 내부에 **SOQL 쿼리**가 완전히 제거되었는가?
+> - [ ] `for` 문 또는 `while` 문 내부에 **DML 구문**이 완전히 제거되었는가?
+> - [ ] After Update/Insert 시 발생할 수 있는 **재귀 호출(Infinite Loop)** 방지 Guard 코드가 작성되었는가?
+> - [ ] SOQL 쿼리 작성 시 `WITH USER_MODE` 또는 `Security.stripInaccessible`을 통한 FLS/CRUD 보안 검증이 이루어졌는가?
+> - [ ] 200건의 Dummy Data를 Data Loader로 Insert/Update하는 **Bulk Unit Test Class**가 작성되었는가?
+{: .prompt-tip }
+
+---
+
+## 결론 및 다음 편 예고
+
+엔터프라이즈 환경에서 잘 구축된 **Apex Trigger Framework**는 시스템의 안정성을 보장하고, 개발자가 비즈니스 로직에만 집중할 수 있는 환경을 제공합니다. 오늘 다룬 **One Trigger Per Object**, **Base TriggerHandler**, **Bulkification**, **CMDT Bypass** 패턴을 적용하면 Governor Limits로 인한 장애를 99% 이상 예방할 수 있습니다.
+
+**다음 편 예고:**
+> **Salesforce Apex 엔터프라이즈 아키텍처 (제 2편)**:
+> **"Domain & Selector Layer 패턴 - fflib 트랜잭션 분리와 100% 가짜 단위 테스트(Unit Testing with Mocks) 설계"** 편으로 이어집니다.

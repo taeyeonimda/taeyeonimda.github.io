@@ -1,5 +1,14 @@
 {
-  "last_track": "a",
+  "last_track": "b",
   "posted_urls": [],
-  "history": []
+  "history": [
+    {
+      "date": "2026-11-25 13:41:54 +0900",
+      "track": "Track B (커리큘럼 시리즈 - Salesforce Apex 엔터프라이즈 아키텍처 #1)",
+      "title": "엔터프라이즈 Apex Trigger Framework 설계 및 Bulkification 완벽 가이드 | Salesforce Apex 엔터프라이즈 아키텍처 #1",
+      "file": "_posts/2026-11-25-salesforce-apex-trigger-framework-best-practices.md",
+      "source_url": null,
+      "curriculum_id": "sf-apex-01"
+    }
+  ]
 }
