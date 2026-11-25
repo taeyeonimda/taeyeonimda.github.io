@@ -267,6 +267,52 @@ def ensure_valid_front_matter(
     return front_matter + safe_body + "\n", title
 
 
+def discover_available_gemini_models(client: genai.Client) -> List[str]:
+    """
+    API 키에서 실제 호출 가능한 최신 Gemini 텍스트 생성 모델 목록을 동적으로 조회합니다.
+    향후 모델 버전이 업그레이드되더라도 코드가 깨지지 않도록 보장합니다.
+    """
+    excluded_keywords = (
+        "embedding",
+        "imagen",
+        "veo",
+        "tts",
+        "audio",
+        "vision",
+        "robotics",
+        "computer-use",
+        "aqa",
+        "bisheng",
+        "learnlm",
+        "gemma",
+    )
+    pro_models: List[str] = []
+    flash_models: List[str] = []
+
+    try:
+        for m in client.models.list():
+            name = (m.name or "").replace("models/", "")
+            if not name.startswith("gemini-"):
+                continue
+            if any(kw in name.lower() for kw in excluded_keywords):
+                continue
+            actions = getattr(m, "supported_actions", None) or []
+            if actions and "generateContent" not in actions:
+                continue
+
+            if "pro" in name.lower():
+                pro_models.append(name)
+            elif "flash" in name.lower():
+                flash_models.append(name)
+    except Exception as exc:
+        print(f"[WARN] 동적 모델 목록 조회 생략: {exc}")
+
+    # 최신 버전이 먼저 오도록 역순 정렬 (pro 우선 -> flash 차선)
+    pro_models.sort(reverse=True)
+    flash_models.sort(reverse=True)
+    return pro_models + flash_models
+
+
 def call_gemini(
     prompt: str,
     date_str: str,
@@ -276,8 +322,9 @@ def call_gemini(
 ) -> Tuple[str, str]:
     """
     Gemini API를 호출하여 블로그 포스트 마크다운을 생성합니다.
-    기본적으로 gemini-2.5-pro를 우선 시도하고, 할당량(Quota) 초과나 일시적 오류 발생 시
-    gemini-2.5-flash로 자동 폴백(Fallback)하여 안정적으로 글을 생성합니다.
+    기본적으로 최신 Pro 모델(gemini-3.1-pro-preview)을 우선 시도하고,
+    무료 티어 한도 초과나 모델 변경 시 최신 Flash 모델(gemini-3.0-flash) 및
+    동적 탐색 모델로 자동 폴백(Fallback)하여 안정적으로 글을 생성합니다.
     반환값: (생성된 마크다운 텍스트, 실제 사용된 모델명)
     """
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -294,11 +341,20 @@ def call_gemini(
         sub_category=sub_category,
     )
 
-    # 우선 시도할 모델 리스트 구성 (기본: gemini-2.5-pro -> gemini-2.5-flash -> gemini-2.0-flash 폴백)
+    # 1차 우선 시도 모델 리스트 (신규 API 키 기준 최신 Gemini 3.x Pro -> Flash 순서)
     candidate_models = [model_name]
-    for fallback_model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+    for fallback_model in [
+        "gemini-3.1-pro-preview",
+        "gemini-3.0-flash",
+        "gemini-3-flash-preview",
+    ]:
         if fallback_model not in candidate_models:
             candidate_models.append(fallback_model)
+
+    # 2차 안전망: API에서 현재 계정이 사용할 수 있는 모델 목록을 동적으로 추가
+    for discovered in discover_available_gemini_models(client):
+        if discovered not in candidate_models:
+            candidate_models.append(discovered)
 
     last_error: Optional[Exception] = None
     for current_model in candidate_models:
@@ -367,8 +423,8 @@ def main() -> int:
     parser.add_argument(
         "--model",
         type=str,
-        default=os.environ.get("GEMINI_MODEL", "gemini-2.5-pro"),
-        help="우선 사용할 Gemini 모델명 (기본값: gemini-2.5-pro, 한도 초과 시 gemini-2.5-flash로 자동 폴백)",
+        default=os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview"),
+        help="우선 사용할 Gemini 모델명 (기본값: gemini-3.1-pro-preview, 한도 초과 시 gemini-3.0-flash 등으로 자동 폴백)",
     )
     args = parser.parse_args()
 
