@@ -246,7 +246,162 @@ public class InactiveAccountCleanupBatch implements Database.Batchable<SObject>,
 
 ---
 
-## 5. 스케줄러(`Schedulable`)와 결합할 때의 실무 팁
+## 5. 실무 응용 패턴: 외부 API 수신 ➔ `Iterable` 배치 체이닝 ➔ `Queueable` 완료(ACK) 회신
+
+단순히 내부 데이터만 정리하는 배치를 넘어, 현업 인터페이스 개발에서 정말 유용하게 쓰이는 **다단계 하이브리드 체이닝 레퍼런스 패턴**을 하나 소개합니다. 나중에 외부 시스템(ERP, 물류, 커머스 등)과 양방향 동기화를 구현할 때 그대로 뼈대로 활용하기 좋은 구조입니다.
+
+### 📌 실무 요건 시나리오
+1. 외부 시스템 API를 호출(GET/POST)하여 변경된 **상위/연관 데이터(`Invoice__c`)**와 **품목 데이터(`OrderItem`)** 수백~수천 건을 JSON으로 받아옵니다.
+2. 받아온 데이터를 Salesforce에 순차적으로 업데이트하되, **인터페이스 업데이트 도중 불필요한 내부 트리거가 돌지 않도록 제어**해야 합니다.
+3. 만약 500건 중 498건은 성공하고 2건은 필수값 오류로 실패했다면, **실제 저장에 성공한 498건의 ID만 골라내어 외부 시스템에 "수신 반영 완료(ACK)" API를 다시 호출**해야 합니다. (실패한 2건은 다음 주기에 재수신되도록 유지)
+
+왜 이 요건을 하나의 메서드에서 처리할 수 없을까요?
+- `1차 조회 Callout` 이후 DB `update`(DML)를 실행하면, 같은 트랜잭션 안에서는 `2차 완료 회신 Callout`을 날릴 수 없습니다(`Uncommitted work pending` 에러).
+- 또한 배치의 `finish()` 단계에서는 `@future` 메서드를 호출할 수 없으므로, 마지막 완료 회신 단계는 **`Queueable` (`Database.AllowsCallouts`)**로 연결해야 매끄럽게 완성됩니다.
+
+```mermaid
+flowchart LR
+    A["1. 수신 Callout (데이터 파싱)"] --> B["2. 1차 Iterable Batch (연관 객체 + 스위치)"]
+    B -- "finish() 체이닝" --> C["3. 2차 Stateful Batch (부분 저장 & 성공 ID 수집)"]
+    C -- "finish() 체이닝" --> D["4. ACK Queueable (성공 ID 외부 회신)"]
+```
+
+### 1단계 & 2단계: 메모리 리스트를 바로 태우는 `Iterable<SObject>` 1차 배치
+
+보통 배치는 `Database.QueryLocator`로 DB를 조회할 때만 쓴다고 생각하기 쉽지만, 이미 외부 API 응답으로 메모리에 만들어 둔 `List<SObject>`가 있다면 **`Iterable<SObject>`**를 반환하여 불필요한 SOQL 없이 200건 단위로 안전하게 쪼개어 DML을 칠 수 있습니다.
+
+```apex
+public class SyncRelatedInvoiceBatch implements Database.Batchable<SObject> {
+
+    private final List<Invoice__c> invoicesToUpdate;
+    private final List<OrderItem> itemsToUpdate;
+    private final Map<Id, String> sfIdToExternalKeyMap;
+
+    public SyncRelatedInvoiceBatch(
+        List<Invoice__c> invoices,
+        List<OrderItem> items,
+        Map<Id, String> externalKeyMap
+    ) {
+        this.invoicesToUpdate = invoices;
+        this.itemsToUpdate = items;
+        this.sfIdToExternalKeyMap = externalKeyMap;
+    }
+
+    // DB 재조회 없이 API에서 파싱한 리스트를 그대로 배치 청크로 투입
+    public Iterable<SObject> start(Database.BatchableContext bc) {
+        return this.invoicesToUpdate;
+    }
+
+    public void execute(Database.BatchableContext bc, List<SObject> scope) {
+        // 1편에서 다룬 TriggerSwitch 패턴: 인터페이스 반영 중 불필요한 트리거 연쇄 차단
+        TriggerSwitch.isExternalSync = true;
+        try {
+            Database.update(scope, false);
+        } finally {
+            TriggerSwitch.isExternalSync = false;
+        }
+    }
+
+    public void finish(Database.BatchableContext bc) {
+        // 1차 반영 완료 후 2차 품목 업데이트 배치로 체이닝!
+        if (this.itemsToUpdate != null && !this.itemsToUpdate.isEmpty() && !Test.isRunningTest()) {
+            Database.executeBatch(
+                new SyncOrderItemBatch(this.itemsToUpdate, this.sfIdToExternalKeyMap),
+                200
+            );
+        }
+    }
+}
+```
+
+### 3단계: 부분 성공(`allOrNone=false`) ID만 선별해 `Queueable`을 부르는 2차 배치
+
+`Database.Stateful`을 활용해 무거운 SObject 전체가 아닌 **성공한 문자열 키(`List<String>`)만 가볍게 누적**한 뒤, `finish()`에서 완료 회신용 `Queueable`을 호출합니다.
+
+```apex
+public class SyncOrderItemBatch implements Database.Batchable<SObject>, Database.Stateful {
+
+    private final List<OrderItem> itemsToUpdate;
+    private final Map<Id, String> sfIdToExternalKeyMap;
+    // 가벼운 문자열 리스트만 Stateful로 유지 (Heap 메모리 안전)
+    private List<String> succeededExternalKeys = new List<String>();
+
+    public SyncOrderItemBatch(List<OrderItem> items, Map<Id, String> externalKeyMap) {
+        this.itemsToUpdate = items;
+        this.sfIdToExternalKeyMap = externalKeyMap;
+    }
+
+    public Iterable<SObject> start(Database.BatchableContext bc) {
+        return this.itemsToUpdate;
+    }
+
+    public void execute(Database.BatchableContext bc, List<SObject> scope) {
+        // 일부 레코드가 실패하더라도 성공한 건은 살리고(false), 성공한 외부 키만 정확히 수집
+        List<Database.SaveResult> saveResults = Database.update(scope, false);
+
+        for (Database.SaveResult sr : saveResults) {
+            if (sr.isSuccess()) {
+                String extKey = this.sfIdToExternalKeyMap.get(sr.getId());
+                if (String.isNotBlank(extKey)) {
+                    this.succeededExternalKeys.add(extKey);
+                }
+            }
+        }
+    }
+
+    public void finish(Database.BatchableContext bc) {
+        // 성공한 건이 있을 때만 외부 시스템으로 ACK 회신 Queueable 실행
+        if (!this.succeededExternalKeys.isEmpty() && !Test.isRunningTest()) {
+            if (Limits.getQueueableJobs() < Limits.getLimitQueueableJobs()) {
+                System.enqueueJob(new SendSyncAckQueueable(this.succeededExternalKeys));
+            }
+        }
+    }
+}
+```
+
+### 4단계: 성공 목록만 외부 API로 회신하는 마무리 `Queueable`
+
+배치의 `finish()` 안에서는 `@future` 호출이 불가능하지만, 아래처럼 `Queueable`에 `Database.AllowsCallouts`를 구현하면 깔끔하게 외부 시스템에 완료 신호를 보낼 수 있습니다.
+
+```apex
+public class SendSyncAckQueueable implements Queueable, Database.AllowsCallouts {
+
+    private final List<String> succeededExternalKeys;
+
+    public SendSyncAckQueueable(List<String> succeededExternalKeys) {
+        this.succeededExternalKeys = succeededExternalKeys;
+    }
+
+    public void execute(QueueableContext context) {
+        HttpRequest req = new HttpRequest();
+        // 보안과 환경 분리를 위해 하드코딩 URL/API Key 대신 Named Credential 사용 권장
+        req.setEndpoint('callout:External_System_API/v1/sync/ack');
+        req.setMethod('POST');
+        req.setHeader('Content-Type', 'application/json; charset=utf-8');
+        req.setTimeout(120000);
+
+        Map<String, Object> payload = new Map<String, Object>{
+            'syncedIds' => this.succeededExternalKeys
+        };
+        req.setBody(JSON.serialize(payload));
+
+        HttpResponse res = new Http().send(req);
+        if (res.getStatusCode() < 200 || res.getStatusCode() >= 300) {
+            throw new CalloutException('ACK 회신 실패: ' + res.getStatusCode() + ' ' + res.getBody());
+        }
+    }
+}
+```
+
+> **이 아키텍처의 실무적 장점**:
+> 1. **트랜잭션 분리 완벽 해결**: 수신 Callout ➔ 다중 객체 대량 DML ➔ 송신 Callout을 에러 없이 한 줄기 파이프라인으로 연결할 수 있습니다.
+> 2. **무결성 보장**: 무조건 전체 완료 신호를 보내는 것이 아니라 `SaveResult.isSuccess()`로 검증된 ID만 회신하므로 데이터 누락이 발생하지 않습니다.
+{: .prompt-tip }
+
+---
+
+## 6. 스케줄러(`Schedulable`)와 결합할 때의 실무 팁
 
 매일 새벽 2시에 배치를 돌릴 때는 `Schedulable` 클래스를 껍데기로 얇게 만들고 실제 로직은 `Batch`나 `Queueable`에 위임합니다.
 
