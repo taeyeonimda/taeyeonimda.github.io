@@ -216,6 +216,7 @@ exclude:
   - "*.config.js"
   - "package*.json"
   - _automation
+  - salesforce-samples
   - AI_BLOG_AUTOMATION_PLAN.md
   - .sf
 

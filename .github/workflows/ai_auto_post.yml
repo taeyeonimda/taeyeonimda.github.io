@@ -169,3 +169,4 @@ jobs:
           git commit -m "docs(post): add ${POST_TITLE}"
           git push origin HEAD
           gh workflow run pages-deploy.yml
+          gh workflow run sf_org_deploy.yml || true

@@ -10,6 +10,8 @@ on:
       - README.md
       - LICENSE
       - AI_BLOG_AUTOMATION_PLAN.md
+      - "salesforce-samples/**"
+      - ".github/workflows/sf_org_deploy.yml"
   pull_request_target:
     types: [opened, synchronize, reopened, closed]
     branches:

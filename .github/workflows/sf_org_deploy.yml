@@ -1,0 +1,189 @@
+name: "Deploy Blog Demo to Salesforce Org"
+
+on:
+  # PR이 main 브랜치에 Merge되거나 _posts/*.md가 추가/수정되었을 때 자동 실행
+  push:
+    branches:
+      - main
+    paths:
+      - "_posts/*.md"
+      - "_posts/**/*.md"
+
+  # GitHub Actions 탭에서 원하는 포스트(또는 최신 포스트)를 수동 지정하여 실행 가능
+  workflow_dispatch:
+    inputs:
+      post_path:
+        description: "(선택) 특정 포스트 경로 (예: _posts/2026-11-26-salesforce-lwc-graphql-vs-auraenabled-guide.md / 비워두면 최신 포스트)"
+        required: false
+        default: ""
+        type: string
+      force_redeploy:
+        description: "이미 배포된 이력이 있어도 강제로 다시 생성·배포할지 여부"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: "sf-org-deploy-main"
+  cancel-in-progress: false
+
+jobs:
+  deploy-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Check Required Secrets
+        id: check_secrets
+        env:
+          SF_AUTH_URL: ${{ secrets.SF_AUTH_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$SF_AUTH_URL" ]; then
+            {
+              echo "## ⚠️ \`SF_AUTH_URL\` 시크릿이 아직 등록되지 않았습니다"
+              echo ""
+              echo "Salesforce Org(\`AgentForce My\`) 자동 배포를 활성화하려면 로컬 터미널(PowerShell)에서 아래 명령어로 인증 URL을 확인한 뒤,"
+              echo "GitHub 저장소의 **Settings → Secrets and variables → Actions → New repository secret**에 등록해 주세요:"
+              echo ""
+              echo "- **Name**: \`SF_AUTH_URL\`"
+              echo "- **Value 추출 명령어**: \`sf org auth show-sfdx-auth-url --target-org \"AgentForce My\"\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::GEMINI_API_KEY 시크릿이 설정되어 있지 않습니다."
+            exit 1
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.check_secrets.outputs.ready == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "_automation/requirements.txt"
+
+      - name: Set up Node.js & Salesforce CLI
+        if: steps.check_secrets.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python deps & @salesforce/cli
+        if: steps.check_secrets.outputs.ready == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r _automation/requirements.txt
+          npm install --global @salesforce/cli
+          sf --version
+
+      - name: Authenticate to "AgentForce My" Org
+        if: steps.check_secrets.outputs.ready == 'true'
+        env:
+          SF_AUTH_URL_RAW: ${{ secrets.SF_AUTH_URL }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+
+          raw = os.environ.get("SF_AUTH_URL_RAW", "").strip()
+          auth_url = raw
+          if raw.startswith("{"):
+              data = json.loads(raw)
+              auth_url = (
+                  (data.get("result") or {}).get("sfdxAuthUrl")
+                  or data.get("sfdxAuthUrl")
+                  or ""
+              ).strip()
+          if not auth_url.startswith("force://"):
+              raise SystemExit("SF_AUTH_URL 형식이 올바르지 않습니다. 'force://...'로 시작하는 SFDX Auth URL 또는 JSON 출력을 넣어주세요.")
+
+          p = pathlib.Path("/tmp/sfdx_auth_url.txt")
+          p.write_text(auth_url, encoding="utf-8")
+          p.chmod(0o600)
+          PY
+
+          sf org login sfdx-url \
+            --sfdx-url-file /tmp/sfdx_auth_url.txt \
+            --alias "AgentForce My" \
+            --set-default
+          rm -f /tmp/sfdx_auth_url.txt
+
+      - name: Detect Target Post(s) & Deploy Demo to "AgentForce My"
+        if: steps.check_secrets.outputs.ready == 'true'
+        id: sf_deploy
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          INPUT_POST: ${{ inputs.post_path || '' }}
+          INPUT_FORCE: ${{ inputs.force_redeploy || false }}
+        run: |
+          set -e
+          FORCE_FLAG=""
+          if [ "$INPUT_FORCE" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_POST" ]; then
+              python _automation/deploy_sf_demo.py --post "$INPUT_POST" $FORCE_FLAG
+            else
+              python _automation/deploy_sf_demo.py --latest $FORCE_FLAG
+            fi
+          else
+            if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+              CHANGED_POSTS=$(git diff-tree --no-commit-id --name-only -r --diff-filter=AM "$AFTER_SHA" -- '_posts/*.md' || true)
+            else
+              CHANGED_POSTS=$(git diff --name-only --diff-filter=AM "$BEFORE_SHA" "$AFTER_SHA" -- '_posts/*.md' || true)
+            fi
+
+            if [ -z "$CHANGED_POSTS" ]; then
+              echo "새로 추가되거나 수정된 _posts/*.md 파일이 없습니다."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "deployed_count=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "감지된 변경 포스트:"
+            echo "$CHANGED_POSTS"
+            python _automation/deploy_sf_demo.py --changed-files "$CHANGED_POSTS" $FORCE_FLAG
+          fi
+
+      - name: Commit Generated Salesforce Samples to Repository
+        if: steps.check_secrets.outputs.ready == 'true' && steps.sf_deploy.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add salesforce-samples/
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(sf-demo): sync AgentForce My sample metadata"
+            git push origin main
+          fi
+
+      - name: Comment Deployment Summary on Merged PR (if applicable)
+        if: steps.check_secrets.outputs.ready == 'true' && github.event_name == 'push' && steps.sf_deploy.outputs.deployed_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          if [ ! -f /tmp/sf_deploy_pr_comment.md ]; then
+            exit 0
+          fi
+          PR_NUM=$(gh pr list --state merged --search "$COMMIT_SHA" --limit 1 --json number --jq '.[0].number // empty' || true)
+          if [ -n "$PR_NUM" ]; then
+            gh pr comment "$PR_NUM" --body-file /tmp/sf_deploy_pr_comment.md || true
+          fi

@@ -594,6 +594,7 @@ def main() -> int:
 1. 이 PR의 **[Files changed]** 탭을 클릭하면 생성된 마크다운 전문(렌더링 뷰 포함)을 바로 읽고 수정할 수 있습니다.
 2. 또한 GitHub Actions의 **`Build and Deploy` (PR 빌드 테스트)**가 자동으로 실행되어 Jekyll 빌드 오류가 없는지 검증합니다.
 3. 글 내용이 마음에 들면 아래 **[Merge pull request]** 버튼을 누르세요! 병합되는 즉시 블로그(`https://taeyeonimda.github.io`)에 최종 공개 배포됩니다.
+4. **Salesforce 기술 포스트**인 경우, Merge 직후 `Deploy Blog Demo to Salesforce Org` 워크플로우가 자동 실행되어 **`AgentForce My` Org에 맞춤형 실습 예제(LWC/Aura/Apex 등)를 자동 생성·배포**하고 이 PR 댓글로 결과를 알려줍니다.
 
 <details>
 <summary>📄 생성된 포스트 앞부분 미리보기 (클릭하여 펼치기)</summary>
