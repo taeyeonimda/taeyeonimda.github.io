@@ -1,6 +1,8 @@
 {
-  "last_track": "b",
-  "posted_urls": [],
+  "last_track": "a",
+  "posted_urls": [
+    "https://developer.salesforce.com/blogs/2026/11/bring-salesforce-developer-docs-into-your-ai-tools"
+  ],
   "history": [
     {
       "date": "2026-11-25 13:41:54 +0900",
@@ -17,6 +19,14 @@
       "file": "_posts/2026-11-25-salesforce-asynchronous-apex-future-queueable-batch.md",
       "source_url": null,
       "curriculum_id": "sf-apex-02"
+    },
+    {
+      "date": "2026-11-28 15:20:46 +0900",
+      "track": "Track A (최신 아티클 큐레이션 - Salesforce Developers Blog)",
+      "title": "Salesforce 공식 문서를 AI 도구에 연동하는 법: llms.txt와 마크다운 액션 활용 가이드",
+      "file": "_posts/2026-11-28-bring-salesforce-developer-docs-into-your-ai-tools.md",
+      "source_url": "https://developer.salesforce.com/blogs/2026/11/bring-salesforce-developer-docs-into-your-ai-tools",
+      "curriculum_id": null
     }
   ]
 }
